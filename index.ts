@@ -126,6 +126,7 @@ async function extract(path: string) {
                 if (text) {
                     try {
                         const parsedResponse = JSON.parse(text) as Response;
+                        console.log('parsedResponse', parsedResponse);
                         return parsedResponse;
                     } catch (error) {
                         console.error("Failed to parse JSON:", error);
