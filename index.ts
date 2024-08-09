@@ -1,7 +1,8 @@
 import { promises as fs } from 'fs';
 
 import 'dotenv/config';
-import { VertexAI, SafetySetting, ModelParams } from '@google-cloud/vertexai';
+import { VertexAI, SafetySetting, ModelParams, GenerateContentResult } from '@google-cloud/vertexai';
+import { RateLimiter } from 'limiter';
 
 
 const PROJECT_ID = 'meme-detector'; // Replace with your Google Cloud project ID
@@ -51,6 +52,20 @@ interface Response {
     confidence: string
 }
 
+const requestLimiter = new RateLimiter({ tokensPerInterval: 10, interval: 'minute' });
+const tokenLimiter = new RateLimiter({ tokensPerInterval: 800000, interval: 'minute' });
+const dailyLimiter = new RateLimiter({ tokensPerInterval: 1400, interval: 'day' });
+
+async function waitForRateLimit(limiter: RateLimiter, tokens: number = 1): Promise<void> {
+    const remainingRequests = await limiter.removeTokens(tokens);
+    if (remainingRequests < 0) {
+        const waitTime = -remainingRequests * (60 * 1000 / limiter.tokensThisInterval);
+        console.log(`Rate limit reached. Waiting for ${waitTime / 1000} seconds.`);
+        await new Promise(resolve => setTimeout(resolve, waitTime));
+    }
+}
+
+
 async function extract(path: string) {
     const pdfData = await fs.readFile(path);
 
@@ -91,29 +106,46 @@ async function extract(path: string) {
 
     const req = {
         contents: [
-            { role: 'user', parts: [document, instruction] }
+            { role: 'user', parts: [document, instruction], }
         ],
     };
 
-    const contentResponse = await generativeModel.generateContent(req);
+    try {
+        // Wait for rate limits
+        await waitForRateLimit(requestLimiter);
+        await waitForRateLimit(dailyLimiter);
 
-
-    if (contentResponse?.response?.candidates && contentResponse.response.candidates.length > 0) {
-        const candidate = contentResponse.response.candidates[0];
-        if (candidate?.content?.parts && candidate.content.parts.length > 0) {
-            const text = candidate.content.parts[0].text?.replace(/\n/g, '\n').replace('```json', '').replace('```', '');
-            if (text) {
-                try {
-                    const parsedResponse = JSON.parse(text) as Response;
-                    console.log('parsedResponse', parsedResponse);
-                    return parsedResponse;
-                } catch (error) {
-                    console.error("Failed to parse JSON:", error);
-                    console.error("Invalid JSON string:", text);
+        // Estimate token usage and wait for token rate limit
+        const estimatedTokens = pdfData.length / 4; // Rough estimate: 1 token ~ 4 bytes
+        await waitForRateLimit(tokenLimiter, estimatedTokens);
+        const contentResponse = await generativeModel.generateContent(req);
+        if (contentResponse?.response?.candidates && contentResponse.response.candidates.length > 0) {
+            const candidate = contentResponse.response.candidates[0];
+            if (candidate?.content?.parts && candidate.content.parts.length > 0) {
+                const text = candidate.content.parts[0].text?.replace(/\n/g, '\n').replace('```json', '').replace('```', '');
+                if (text) {
+                    try {
+                        const parsedResponse = JSON.parse(text) as Response;
+                        return parsedResponse;
+                    } catch (error) {
+                        console.error("Failed to parse JSON:", error);
+                        console.error("Invalid JSON string:", text);
+                    }
                 }
             }
         }
+    } catch (error) {
+        if (error?.code === 429) {
+            console.error(`Rate limit exceeded for ${path}. Waiting for 60 seconds before retrying.`);
+            await new Promise(resolve => setTimeout(resolve, 60000)); // Wait for 60 seconds
+            return extract(path); // Retry the extraction
+        } else {
+            console.error(`Failed to extract data from document: ${path} -> ${error}`);
+        }
     }
+
+
+
     return null;
 
 }
