@@ -138,7 +138,6 @@ async function extract(path: string) {
     } catch (error) {
         if (error?.code === 429) {
             console.error(`Rate limit exceeded for ${path}. Waiting for 60 seconds before retrying.`);
-            await new Promise(resolve => setTimeout(resolve, 60000)); // Wait for 60 seconds
             return extract(path); // Retry the extraction
         } else {
             console.error(`Failed to extract data from document: ${path} -> ${error}`);
